@@ -3,15 +3,13 @@
 This repository contains the code for the SIGGRAPH 2026 paper [Dual Contouring of Signed Distance Data](https://gatc.cs.columbia.edu/projects/dual-contouring-of-signed-distance-data.html), by Xiana Carrera, Ningna Wang, Christopher Batty, Oded Stein, and Silvia Sellán.
 
 > [!CAUTION]
-> This code was tested on macOS only. If you encounter issues with other platforms, please contact [x.carrera@columbia.edu](mailto:x.carrera@columbia.edu).
+> This code is tested on macOS only. If you encounter issues with other platforms, contact [x.carrera@columbia.edu](mailto:x.carrera@columbia.edu).
 
-
-We propose an algorithm to reconstruct explicit polygonal meshes from discretely sampled Signed Distance Function (SDF) data, which is especially effective at recovering sharp features.Building on the traditional Dual Contouring of Hermite Data method, we design and solve a quadratic optimization problem to decide the optimal placement of the mesh's vertices within each cell of a regular grid. Critically, this optimization relies solely on discretely sampled SDF data, without requiring arbitrary access to the function, gradient information, or training on large-scale datasets. Our method sets a new state of the art in surface reconstruction from SDFs at medium and high resolutions, and opens the door for applications in 3D modeling and design.
+The method reconstructs explicit polygonal meshes from discretely sampled signed distance data and is designed to recover sharp features. It optimizes one mesh vertex per active grid cell using only sampled SDF values, without requiring arbitrary function queries, gradient access, or trained models.
 
 ![Teaser](images/teaser.png)
 
-
-## Installation
+## Build
 
 ### 1. Clone with submodules
 
@@ -20,61 +18,89 @@ git clone --recursive https://github.com/xianacarrera/dcsdd.git
 cd dcsdd
 ```
 
-### 2. Set up a Python environment
-
-We recommend [conda](https://docs.conda.io/) with Python 3.13:
+If the repository was cloned without submodules:
 
 ```bash
-conda create -n dcsdd python=3.13 pip -y
-conda activate dcsdd
-pip install -r requirements.txt
+git submodule update --init --recursive
 ```
 
-### 3. Build the C++ library and Python bindings
+### 2. Configure and compile
+
+Install the Xcode command-line tools, CMake 3.21 or newer, and Ninja. Then run:
 
 ```bash
-mkdir -p build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(sysctl -n hw.ncpu 2>/dev/null || nproc)
-cd ..
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
 
-This compiles the core C++ library and places the Python extension module at `src/python/contouring/_contouring_cpp_module*.so`.
+The executable is created at `build/dcsdd_app`.
 
-### 4. Verify the installation
+## Desktop Application
+
+Launch the application with an empty scene:
 
 ```bash
-python -c "import sys; sys.path.insert(0, '.'); import src.python.contouring as contouring; print('OK')"
+./build/dcsdd_app
 ```
 
-## Usage
+Or load a mesh immediately:
 
-All scripts should be run from the **repository root**.
+```bash
+./build/dcsdd_app data/bunny.obj
+```
 
-For convenience, `scripts/run_ours.py` provides a ready-to-use script that runs our method, Dual Contouring, Marching Cubes, RFTA and Kohlbrenner and Alexa [2025a, 2025b] on a given mesh. The script also saves the resulting meshes and prints the runtime for each method.
+The Polyscope/ImGui interface supports:
 
-The main code for our method can be found under `src/`. The figures in the paper can be reproduced by running the scripts in `scripts/`, which will save their outputs in the corresponding subfolders of `results/`. For convenience, these subfolders already contain `.zip` archives with the precomputed results of the scripts.
+- Loading OBJ, OFF, PLY, and STL triangle meshes through a native file dialog or drag and drop.
+- Translation, rotation, per-axis scaling, reset, and normalization controls.
+- Editable sampling bounds, padding, linked or independent grid resolution, and iso value.
+- Marching Cubes, Dual Contouring, and the paper's optimization method.
+- All `ContouringOptions` parameters, including iteration counts, energy weights, Hermite updates, SVD threshold, and batch size.
+- Background generation with progress, cancellation, validation errors, and preservation of the last successful result.
+- Independent source/result visibility, shading, wireframe, and color controls.
+- OBJ export with triangle or quad faces as produced by the selected method.
 
-### Key parameters (`ContouringOptions`)
+Parameter changes mark the current result as stale. Click **Generate** to run the current configuration.
+
+## Install
+
+To install the executable under a custom prefix:
+
+```bash
+cmake --install build --prefix dist
+./dist/bin/dcsdd_app
+```
+
+## Tests
+
+```bash
+cmake -S . -B build-test -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DDCSDD_BUILD_TESTS=ON
+cmake --build build-test
+ctest --test-dir build-test --output-on-failure
+```
+
+## Key Parameters
 
 | Parameter | Default | Description |
-|---|---|---|
-| `outer_iters` | 100 | Number of iterations in the outer loop |
-| `inner_iters` | 100 | Number of iterations in the inner loop (local energy minimization) |
-| `hermite_update` | `True` | Whether to refine Hermite positions from the mesh |
+|---|---:|---|
+| `outer_iters` | 100 | Outer optimization iterations |
+| `inner_iters` | 100 | Per-cell local minimization iterations |
+| `hermite_update` | `true` | Refine Hermite positions and normals between outer iterations |
 | `mu` | 0.1 | Regularization weight |
-| `dc_weight` | 0.02 | Weight of the Dual Contouring (Hermite) energy term |
-| `new_hermite_pos_weight` | 0.2 | Blend weight for updating Hermite positions |
-| `new_hermite_normal_weight` | 0.2 | Blend weight for updating Hermite normals |
-| `new_face_pos_weight` | 0.2 | Blend weight for updating face positions |
-| `batch_size` | 200000 | Number of SDF grid points processed per batch |
-| `verbose` | `False` | Print per-iteration energy values |
-
+| `dc_weight` | 0.02 | Dual Contouring energy weight |
+| `sphere_weight` | 1.0 | Sphere constraint weight |
+| `svd_threshold` | 0.01 | Singular-value cutoff used by the local solve |
+| `new_hermite_pos_weight` | 0.2 | Hermite position update blend |
+| `new_hermite_normal_weight` | 0.2 | Hermite normal update blend |
+| `new_face_pos_weight` | 0.2 | Face intersection update blend |
+| `batch_size` | 200000 | SDF samples processed per sphere-assignment batch |
+| `verbose` | `false` | Print detailed iteration information |
 
 ## Citation
 
-If you use this code in your research, please cite:
+If you use this code in your research, cite:
 
 ```bibtex
 @inproceedings{Carrera2026DCSDD,
@@ -93,10 +119,6 @@ If you use this code in your research, please cite:
 }
 ```
 
-## Issues
+## Acknowledgements
 
-Please [email us](mailto:x.carrera@columbia.edu) if you have any questions or issues related to this project.
-
-## Ackwnoledgements
-
-The Geometry and the City lab at Columbia University is supported by generous gifts from nTop, Adobe, Dandy, and Braid Technologies, as well as by a sponsored research project from Dreamsports and the Columbia Engineering Interdisciplinary Research Fund. Christopher Batty acknowledges the generous support from the Natural Sciences and Engineering Research Council of Canada (Grant RGPIN-2021-02524). Oded Stein acknowledges the generous support from the National Science Foundation (award #2335493) and a gift from Adobe.
+The Geometry and the City lab at Columbia University is supported by gifts from nTop, Adobe, Dandy, and Braid Technologies, and by a sponsored research project from Dreamsports and the Columbia Engineering Interdisciplinary Research Fund. Christopher Batty acknowledges support from the Natural Sciences and Engineering Research Council of Canada (Grant RGPIN-2021-02524). Oded Stein acknowledges support from the National Science Foundation (award #2335493) and a gift from Adobe.

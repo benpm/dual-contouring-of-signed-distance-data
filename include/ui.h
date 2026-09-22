@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Core>
+#include <vector>
 
 struct ContouringOptions;
 class Cell;
@@ -39,4 +40,3 @@ void start_outer_iteration(
     int resZ,
     const ContouringOptions& opts
 );
-

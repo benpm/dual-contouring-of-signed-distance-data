@@ -2,19 +2,18 @@
 #include "Cell.h"
 #include "vertex_refinement.h"
 #include "ui.h"
+#include <algorithm>
 #include <vector>
 #include <cassert>
+#include <cmath>
 #include <igl/marching_cubes.h>
 #include <iostream>
-#include <polyscope/polyscope.h>
-#include <polyscope/point_cloud.h>
-#include <glm/glm.hpp>
+#include <random>
+#include <stdexcept>
 #include <igl/point_mesh_squared_distance.h>
 #include <igl/AABB.h>
 #include <Eigen/Core>
 #include "hermite_update.h"
-
-#include <polyscope/surface_mesh.h>
 
 
 int currentCell = 0;
@@ -1191,6 +1190,212 @@ void show_total_energy(
     }
 }
 
+namespace {
+
+bool is_cancelled(const ContouringCallbacks& callbacks) {
+    return callbacks.cancel_requested && callbacks.cancel_requested();
+}
+
+void report_progress(
+    const ContouringCallbacks& callbacks,
+    ContouringStage stage,
+    int completed,
+    int total,
+    const std::string& message
+) {
+    if (!callbacks.progress) return;
+    const int safe_total = std::max(1, total);
+    callbacks.progress({
+        stage,
+        completed,
+        safe_total,
+        std::clamp(static_cast<double>(completed) / safe_total, 0.0, 1.0),
+        message
+    });
+}
+
+} // namespace
+
+void validate_contouring_input(
+    const Eigen::VectorXd& S,
+    const Eigen::MatrixXd& GV,
+    int resX,
+    int resY,
+    int resZ,
+    double isoValue,
+    const ContouringOptions& options
+) {
+    if (resX < 2 || resY < 2 || resZ < 2) {
+        throw std::invalid_argument("Grid resolutions must each be at least 2");
+    }
+    const long long expected = static_cast<long long>(resX) * resY * resZ;
+    if (S.size() != expected || GV.rows() != expected || GV.cols() != 3) {
+        throw std::invalid_argument("S and GV must match resX * resY * resZ");
+    }
+    if (!S.allFinite() || !GV.allFinite() || !std::isfinite(isoValue)) {
+        throw std::invalid_argument("Grid samples, positions, and iso value must be finite");
+    }
+    if (options.outer_iters < 0 || options.inner_iters < 0) {
+        throw std::invalid_argument("Iteration counts cannot be negative");
+    }
+    if (options.batch_size <= 0) {
+        throw std::invalid_argument("batch_size must be positive");
+    }
+    const double values[] = {
+        options.mu,
+        options.dc_weight,
+        options.sphere_weight,
+        options.svd_threshold,
+        options.new_hermite_pos_weight,
+        options.new_face_pos_weight,
+        options.new_hermite_normal_weight
+    };
+    for (double value : values) {
+        if (!std::isfinite(value)) {
+            throw std::invalid_argument("Contouring parameters must be finite");
+        }
+    }
+    if (options.svd_threshold < 0.0 || options.mu < 0.0 || options.dc_weight < 0.0 ||
+        options.sphere_weight < 0.0) {
+        throw std::invalid_argument("Contouring weights and thresholds cannot be negative");
+    }
+}
+
+ContouringStatus contouring(
+    const Eigen::VectorXd& S,
+    const Eigen::MatrixXd& GV,
+    int resX,
+    int resY,
+    int resZ,
+    double isoValue,
+    Eigen::MatrixXd& V_out,
+    Eigen::MatrixXi& F_out,
+    const ContouringOptions& options,
+    const TrueSdfFunc& true_sdf,
+    const TrueSdfGradFunc& true_sdf_grad,
+    const ContouringCallbacks& callbacks
+) {
+    report_progress(callbacks, ContouringStage::Validating, 0, 1, "Validating input");
+    validate_contouring_input(S, GV, resX, resY, resZ, isoValue, options);
+    if (is_cancelled(callbacks)) return ContouringStatus::Cancelled;
+
+    Eigen::MatrixXd V;
+    Eigen::MatrixXi F;
+
+    if (options.verbose) {
+        const char* method_name = options.method == ContouringMethod::MarchingCubes
+            ? "MarchingCubes"
+            : options.method == ContouringMethod::DualContouring ? "DualContouring" : "Ours";
+        std::cout << "[contouring] method = " << method_name
+                  << ", grid = " << resX << " x " << resY << " x " << resZ
+                  << ", iso = " << isoValue << std::endl;
+    }
+
+    if (options.method == ContouringMethod::MarchingCubes) {
+        report_progress(callbacks, ContouringStage::ExtractingMesh, 0, 1, "Running Marching Cubes");
+        igl::marching_cubes(S, GV, resX, resY, resZ, isoValue, V, F);
+        if (is_cancelled(callbacks)) return ContouringStatus::Cancelled;
+        V_out = std::move(V);
+        F_out = std::move(F);
+        report_progress(callbacks, ContouringStage::Complete, 1, 1, "Complete");
+        return ContouringStatus::Completed;
+    }
+
+    std::vector<Cell> cells;
+    std::vector<Eigen::Vector3d> hermite_normals_per_quad;
+    report_progress(callbacks, ContouringStage::GeneratingCells, 0, 1, "Generating grid cells");
+    cells = generate_cells(S, GV, resX, resY, resZ, true_sdf, true_sdf_grad);
+    if (is_cancelled(callbacks)) return ContouringStatus::Cancelled;
+
+    average_hermite_normals(cells, resX, resY, resZ, options.verbose);
+    report_progress(callbacks, ContouringStage::SolvingQefs, 0, 1, "Solving initial QEFs");
+    for (Cell& cell : cells) {
+        cell.update();
+    }
+    average_hermite_normals(cells, resX, resY, resZ, options.verbose);
+    if (is_cancelled(callbacks)) return ContouringStatus::Cancelled;
+
+    report_progress(callbacks, ContouringStage::ExtractingMesh, 0, 1, "Extracting initial mesh");
+    extract_mesh_from_cells(cells, S, GV, resX, resY, resZ, V, F, hermite_normals_per_quad);
+
+    if (options.method == ContouringMethod::Ours) {
+        for (Cell& cell : cells) {
+            if (cell.has_vertex) cell.vertex = cell.getCentroid();
+        }
+
+        for (int outer_iter = 0; outer_iter < options.outer_iters; ++outer_iter) {
+            if (is_cancelled(callbacks)) return ContouringStatus::Cancelled;
+            if (options.verbose) {
+                std::cout << "\n[contouring] Outer iteration " << (outer_iter + 1)
+                          << " / " << options.outer_iters << std::endl;
+            }
+
+            Eigen::MatrixXi TriF = triangulate_v1(F, V);
+            report_progress(callbacks, ContouringStage::AssigningSpheres, outer_iter, options.outer_iters, "Assigning spheres");
+            assign_spheres_to_cells(S, GV, V, F, cells, resX, resY, resZ, options.batch_size, TriF);
+            if (is_cancelled(callbacks)) return ContouringStatus::Cancelled;
+
+            report_progress(callbacks, ContouringStage::ComputingIntersections, outer_iter, options.outer_iters, "Computing face intersections");
+            compute_face_cell_intersections(cells, resX, resY, resZ, options.new_face_pos_weight);
+            if (is_cancelled(callbacks)) return ContouringStatus::Cancelled;
+
+            if (options.hermite_update && outer_iter > 0) {
+                report_progress(callbacks, ContouringStage::UpdatingHermiteData, outer_iter, options.outer_iters, "Updating Hermite data");
+                update_hermite_points_and_normals(
+                    cells,
+                    resX,
+                    resY,
+                    resZ,
+                    options.new_hermite_normal_weight,
+                    options.new_hermite_pos_weight,
+                    true,
+                    options.verbose
+                );
+                if (is_cancelled(callbacks)) return ContouringStatus::Cancelled;
+            }
+
+            report_progress(callbacks, ContouringStage::RefiningVertices, outer_iter, options.outer_iters, "Refining vertices");
+            #pragma omp parallel for schedule(dynamic)
+            for (size_t i = 0; i < cells.size(); ++i) {
+                Cell& cell = cells[i];
+                if (!cell.has_vertex) continue;
+                cell.prev_outer_vertex = cell.vertex;
+                for (int inner_iter = 0; inner_iter < options.inner_iters; ++inner_iter) {
+                    cell.prev_vertex = cell.vertex;
+                    refine_vertex_from_face_intersections(cell);
+                    if (!cell.closest_points_info.empty()) {
+                        cell.minimize_qef(
+                            options.mu,
+                            options.dc_weight,
+                            options.sphere_weight,
+                            options.svd_threshold,
+                            options.verbose
+                        );
+                    }
+                    if ((cell.vertex - cell.prev_vertex).norm() < 1e-6) break;
+                }
+                cell.clean();
+            }
+
+            if (is_cancelled(callbacks)) return ContouringStatus::Cancelled;
+            report_progress(callbacks, ContouringStage::ExtractingMesh, outer_iter + 1, options.outer_iters, "Extracting mesh");
+            extract_mesh_from_cells(cells, S, GV, resX, resY, resZ, V, F, hermite_normals_per_quad);
+            show_total_energy(cells, options.verbose);
+        }
+
+        if (options.outer_iters == 0) {
+            report_progress(callbacks, ContouringStage::ExtractingMesh, 1, 1, "Extracting centroid mesh");
+            extract_mesh_from_cells(cells, S, GV, resX, resY, resZ, V, F, hermite_normals_per_quad);
+        }
+    }
+
+    if (is_cancelled(callbacks)) return ContouringStatus::Cancelled;
+    V_out = std::move(V);
+    F_out = std::move(F);
+    report_progress(callbacks, ContouringStage::Complete, 1, 1, "Complete");
+    return ContouringStatus::Completed;
+}
+
 void contouring(
     const Eigen::VectorXd& S,
     const Eigen::MatrixXd& GV,
@@ -1203,190 +1408,9 @@ void contouring(
     const ContouringOptions& options,
     const TrueSdfFunc& true_sdf,
     const TrueSdfGradFunc& true_sdf_grad
-){
-    if (options.verbose) {
-        std::cout << "[contouring] method = "
-                  << (options.method == ContouringMethod::DualContouring ?
-                      "DualContouring" : "MarchingCubes")
-                  << ", grid = " << resX << " x " << resY << " x " << resZ
-                  << ", iso = " << isoValue << std::endl;
-    }
-
-    // call to marching cubes
-    if (options.method == ContouringMethod::MarchingCubes) {
-        igl::marching_cubes(S, GV, resX, resY, resZ, isoValue, V, F);
-        return;
-    }
-
-    // ===========================
-    // Dual Contouring
-    // ===========================
-    std::vector<Cell> cells;
-    std::vector<Eigen::Vector3d> hermite_normals_per_quad;
-    if (options.method == ContouringMethod::DualContouring ||
-        options.method == ContouringMethod::Ours) {
-        if (options.verbose) { std::cout << "[contouring] Generating cells..." << std::endl; }
-        cells = generate_cells(S, GV, resX, resY, resZ, true_sdf, true_sdf_grad);
-        average_hermite_normals(cells,resX,resY,resZ, options.verbose);
-        if (options.verbose) { std::cout << "[contouring] Solving QEFs..." << std::endl; }
-
-        for (Cell& c : cells) {
-            c.update();
-        }
-
-        average_hermite_normals(cells,resX,resY,resZ, options.verbose);
-
-        // Store a copy of the generated cells so an external UI can examine them.
-        clearGeneratedCells();
-        globalCellsPtr = new std::vector<Cell>(cells);
-        if (options.verbose) { std::cout << "[contouring] Extracting mesh..." << std::endl; }
-
-        extract_mesh_from_cells(cells, S, GV, resX, resY, resZ, V, F, hermite_normals_per_quad);
-    }
-
-    // ===========================
-    // Ours
-    // ===========================
-    if (options.method == ContouringMethod::Ours) {
-        // make all the centroid
-        for( Cell& c : cells){
-            if( c.has_vertex ){
-                c.vertex = c.getCentroid();
-            }
-        }
-        for (int outer_iter = 0; outer_iter < options.outer_iters; ++outer_iter) {
-            if (options.verbose) {
-                std::cout << "\n[contouring] Outer iteration " << (outer_iter + 1)
-                          << " / " << options.outer_iters << std::endl;
-            }
-
-
-
-            // Triangulate F
-            Eigen::MatrixXi TriF = triangulate_v1(F, V);
-
-            // // Optimize the triangulation of each quad based on the distance to spheres
-            // optimize_triangulation(S, GV, V, F, TriF, resX, resY, resZ);
-
-            // Eigen::MatrixXi TriF;
-            // triangulate_based_on_hermite_normal(V, F, TriF, hermite_normals_per_quad);
-
-            if (options.verbose) { std::cout << "[contouring] Assigning spheres..." << std::endl; }
-            assign_spheres_to_cells(S, GV, V, F, cells, resX, resY, resZ, options.batch_size, TriF);
-            
-            if (options.verbose) { std::cout << "[contouring] Computing intersections..." << std::endl; }
-            compute_face_cell_intersections(cells, resX, resY, resZ, options.new_face_pos_weight);
-
-            if (options.hermite_update && outer_iter > 0){
-                if (options.verbose) { std::cout << "[contouring] Updating Hermite points and normals..." << std::endl; }
-                update_hermite_points_and_normals(cells, resX, resY, resZ, options.new_hermite_normal_weight, options.new_hermite_pos_weight, true, options.verbose);
-            }
-
-            if (options.verbose) { std::cout << "[contouring] Updating vertices..." << std::endl; }
-
-            #pragma omp parallel for schedule(dynamic)
-            for (size_t i = 0; i < cells.size(); ++i) {
-                Cell& c = cells[i];
-
-                if (!c.has_vertex) continue;
-
-                c.prev_outer_vertex = c.vertex;
-
-                for (int inner_iter = 0; inner_iter < options.inner_iters; ++inner_iter) {
-                    c.prev_vertex = c.vertex;
-                    refine_vertex_from_face_intersections(c);
-                    if (!c.closest_points_info.empty()) {
-                        c.minimize_qef(
-                            options.mu,
-                            options.dc_weight,
-                            options.sphere_weight,
-                            options.svd_threshold,
-                            options.verbose
-                        );
-                    }
-                    if((c.vertex - c.prev_vertex).norm() < 1e-6) break;
-                }
-                // if(outer_iter % 2 ==0){c.update();}
-                c.clean();
-            }
-            
-            // Re-extract mesh after sphere assignment
-            extract_mesh_from_cells(cells, S, GV, resX, resY, resZ, V, F, hermite_normals_per_quad);
-
-            // Sum the energy from all cells and print it
-            show_total_energy(cells, options.verbose);
-        }
-
-        // If no outer iterations, we just compute the centroids and extract the mesh here
-        if (options.outer_iters == 0) {
-            extract_mesh_from_cells(cells, S, GV, resX, resY, resZ, V, F, hermite_normals_per_quad);
-        }
-
-        
-        // Copy F, triangulate and optimize it
-        Eigen::MatrixXi copyF = F;
-        // F = triangulate_v1(copyF, V);
-        // optimize_triangulation(S, GV, V, copyF, F, resX, resY, resZ);
-        // triangulate_based_on_hermite_normal(V, copyF, F, hermite_normals_per_quad);
-
-        // Collect all Hermite points and normals across cells, then register once
-        std::vector<Eigen::Vector3d> allHermitePos;
-        std::vector<Eigen::Vector3d> allHermiteNrm;
-        allHermitePos.reserve(resX * resY * resZ);
-        allHermiteNrm.reserve(resX * resY * resZ);
-        // Also extract vertex -> cell index mapping
-        std::vector<float> vertexCellIndex;
-
-        for (const Cell& c : cells) {
-            if (!c.has_vertex) continue;
-            for (const auto& kv : c.hermite_positions) {
-                int edge_idx = kv.first;
-                const Eigen::Vector3d& pos = kv.second;
-                const Eigen::Vector3d& normal = c.hermite_normals.at(edge_idx);
-                allHermitePos.push_back(pos);
-                allHermiteNrm.push_back(normal);
-
-                // Get cell idx
-                int cell_idx = cellIndex3D(c.ix, c.iy, c.iz, resX, resY, resZ);
-                vertexCellIndex.push_back((float) cell_idx);
-            }
-        }
-
-        // Register a single global point cloud with Polyscope (if available)
-        polyscope::init();
-        try {
-            if (!allHermitePos.empty()) {
-                Eigen::MatrixXd H((int)allHermitePos.size(), 3);
-                Eigen::MatrixXd N((int)allHermiteNrm.size(), 3);
-                for (size_t i = 0; i < allHermitePos.size(); ++i) {
-                    H.row((int)i) = allHermitePos[i].transpose();
-                    N.row((int)i) = allHermiteNrm[i].transpose();
-                }
-
-                // Remove any previous global Hermite structure
-                polyscope::removeStructure("Global Hermite points", /*errorIfAbsent=*/false);
-
-                auto* pc = polyscope::registerPointCloud("Global Hermite points", H);
-                pc->setPointColor(glm::vec3(0.5f, 0.0f, 0.5f));
-
-                std::vector<glm::vec3> hermiteColors((size_t)H.rows(), glm::vec3(0.5f, 0.0f, 0.5f));
-                pc->addColorQuantity("Hermite color", hermiteColors)->setEnabled(true);
-
-                pc->addVectorQuantity("Hermite normals", N)->setVectorColor(glm::vec3(1.0f, 0.5f, 0.0f));
-
-                // Add the cell index as a scalar quantity
-                if (!vertexCellIndex.empty() && (int)vertexCellIndex.size() == H.rows()) {
-                    pc->addScalarQuantity("cell index", vertexCellIndex)->setEnabled(false);
-                }
-            
-            }
-        } catch(...) {
-            // ignore Polyscope errors (e.g., run without UI)
-        }
-
-    }
+) {
+    contouring(S, GV, resX, resY, resZ, isoValue, V, F, options, true_sdf, true_sdf_grad, {});
 }
-
 
 void contouring(
     const Eigen::VectorXd& S,
@@ -1398,12 +1422,21 @@ void contouring(
     Eigen::MatrixXd& V,
     Eigen::MatrixXi& F,
     const ContouringOptions& options
-)
-{
-    // just forward, with null pointers → generate_cells will use finite differences
-    contouring(S, GV, resX, resY, resZ,
-               isoValue, V, F,
-               options,
-               /*true_sdf=*/nullptr,
-               /*true_sdf_grad=*/nullptr);
+) {
+    contouring(S, GV, resX, resY, resZ, isoValue, V, F, options, nullptr, nullptr, {});
+}
+
+ContouringStatus contouring(
+    const Eigen::VectorXd& S,
+    const Eigen::MatrixXd& GV,
+    int resX,
+    int resY,
+    int resZ,
+    double isoValue,
+    Eigen::MatrixXd& V,
+    Eigen::MatrixXi& F,
+    const ContouringOptions& options,
+    const ContouringCallbacks& callbacks
+) {
+    return contouring(S, GV, resX, resY, resZ, isoValue, V, F, options, nullptr, nullptr, callbacks);
 }

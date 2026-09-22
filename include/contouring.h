@@ -2,6 +2,8 @@
 
 #include <Eigen/Core>
 #include <functional>
+#include <string>
+#include <vector>
 
 using TrueSdfFunc      = std::function<double(const Eigen::RowVector3d&)>;
 using TrueSdfGradFunc  = std::function<Eigen::RowVector3d(const Eigen::RowVector3d&)>;
@@ -39,6 +41,75 @@ struct ContouringOptions {
     double new_hermite_normal_weight = 0.2;
     int batch_size = 200000;
 };
+
+enum class ContouringStage {
+    Validating,
+    SamplingSdf,
+    GeneratingCells,
+    SolvingQefs,
+    AssigningSpheres,
+    ComputingIntersections,
+    UpdatingHermiteData,
+    RefiningVertices,
+    ExtractingMesh,
+    Complete
+};
+
+struct ContouringProgress {
+    ContouringStage stage = ContouringStage::Validating;
+    int completed = 0;
+    int total = 1;
+    double fraction = 0.0;
+    std::string message;
+};
+
+struct ContouringCallbacks {
+    std::function<void(const ContouringProgress&)> progress;
+    std::function<bool()> cancel_requested;
+};
+
+enum class ContouringStatus {
+    Completed,
+    Cancelled
+};
+
+void validate_contouring_input(
+    const Eigen::VectorXd& S,
+    const Eigen::MatrixXd& GV,
+    int resX,
+    int resY,
+    int resZ,
+    double isoValue,
+    const ContouringOptions& options
+);
+
+ContouringStatus contouring(
+    const Eigen::VectorXd& S,
+    const Eigen::MatrixXd& GV,
+    int resX,
+    int resY,
+    int resZ,
+    double isoValue,
+    Eigen::MatrixXd& V,
+    Eigen::MatrixXi& F,
+    const ContouringOptions& options,
+    const TrueSdfFunc& true_sdf,
+    const TrueSdfGradFunc& true_sdf_grad,
+    const ContouringCallbacks& callbacks
+);
+
+ContouringStatus contouring(
+    const Eigen::VectorXd& S,
+    const Eigen::MatrixXd& GV,
+    int resX,
+    int resY,
+    int resZ,
+    double isoValue,
+    Eigen::MatrixXd& V,
+    Eigen::MatrixXi& F,
+    const ContouringOptions& options,
+    const ContouringCallbacks& callbacks
+);
 
 // A single, simple function that mimics the libigl marching_cubes API
 void contouring(
