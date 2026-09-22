@@ -41,8 +41,3 @@ _deps/*
 .DS_Store
 *.blend
 *.blend1
-
-# Oversized result archives (>100MB, exceed GitHub's file size limit)
-results/large-scale-test/large-scale-test.zip
-results/many-shapes-experiment/many-shapes-experiment.zip
-results/noise-performance/noise-performance.zip

@@ -111,7 +111,7 @@ ContouringStatus contouring(
     const ContouringCallbacks& callbacks
 );
 
-// A single, simple function that mimics the libigl marching_cubes API
+// Legacy internal entry point.
 void contouring(
     const Eigen::VectorXd& S,
     const Eigen::MatrixXd& GV,
@@ -125,17 +125,6 @@ void contouring(
     const TrueSdfFunc& true_sdf,
     const TrueSdfGradFunc& true_sdf_grad
 );
-
-// Access to generated cells for debugging/visualization
-// Returns pointer to a vector<Cell> owned by the library (may be nullptr)
-std::vector<class Cell>* getGeneratedCells();
-// Clear the stored pointer (called on shutdown or before generating new cells)
-void clearGeneratedCells();
-
-// Advance a single cell by one inner iteration (calls refine + minimize on that cell).
-// This corresponds to the body of the inner loop in the Ours method and affects only
-// the supplied Cell. The caller should re-extract the mesh if needed.
-void step_cell_inner_iteration(class Cell& cell, const ContouringOptions& options);
 
 Eigen::Vector3d gradientAt(
     const Eigen::MatrixXd &GV, 

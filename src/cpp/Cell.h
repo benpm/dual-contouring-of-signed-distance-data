@@ -120,7 +120,4 @@ public:
 
     void clean();
 
-    // for debugging
-    void visualize() const;
 };
-

@@ -2,16 +2,11 @@
 #include "contouring.h"
 #include "vertex_refinement.h"
 #include <iostream>
-#include <polyscope/polyscope.h>
-#include <polyscope/surface_mesh.h>
-#include <polyscope/point_cloud.h>
-#include <polyscope/curve_network.h>
 #include <unordered_map>
 #include <cstdlib>
 #include <string>
 #include <cassert>
 #include <Eigen/Geometry>
-#include <igl/AABB.h>
 
 
 inline int cellIndex3D(int i, int j, int k, int resX, int resY, int resZ) {
@@ -604,77 +599,6 @@ void update_hermite_points_and_normals(
                 }
             }
 
-            // visualize using polyscope
-            #ifndef NDEBUG
-            {
-                polyscope::init();
-                polyscope::registerSurfaceMesh("edge_processing_temp_mesh", V_global, F_global);
-                std::vector<Eigen::Vector3d> points_to_show;
-                points_to_show.push_back(intersection_point);
-                // plot pA and pB too as curve network
-                std::vector<Eigen::Vector3d> curve_points;
-                curve_points.push_back(pA);
-                curve_points.push_back(pB);
-                std::vector<Eigen::Vector2i> curve_edges;
-                curve_edges.push_back(Eigen::Vector2i(0,1));
-                polyscope::registerCurveNetwork("edge_line", curve_points, curve_edges);
-                polyscope::registerPointCloud("intersection_point", points_to_show);
-                // visualize the quad formed by the four vertex samples (all_verts)
-                Eigen::MatrixXd quad_V(4, 3);
-                for (int qi = 0; qi < 4; ++qi) {
-                    quad_V.row(qi) = all_verts.row(qi);
-                }
-                std::cout << all_verts << "\n";
-                Eigen::MatrixXi quad_F(1, 4);
-                quad_F << 0, 1, 2, 3;
-                polyscope::registerSurfaceMesh("edge_quad", quad_V, quad_F);
-
-                // visualize the best-fit plane as a finite rectangular patch around the centroid
-                Eigen::Vector3d centroid3 = centroid.transpose();
-                Eigen::Vector3d u = plane_normal.unitOrthogonal();
-                u.normalize();
-                Eigen::Vector3d v = plane_normal.cross(u);
-                v.normalize();
-
-                double half_u = 0.0, half_v = 0.0;
-                // cover the four vertices
-                for (int qi = 0; qi < 4; ++qi) {
-                    Eigen::Vector3d d = all_verts.row(qi).transpose() - centroid3;
-                    half_u = std::max(half_u, std::abs(d.dot(u)));
-                    half_v = std::max(half_v, std::abs(d.dot(v)));
-                }
-                // and also the processed edge endpoints
-                {
-                    Eigen::Vector3d dA = pA - centroid3;
-                    Eigen::Vector3d dB = pB - centroid3;
-                    half_u = std::max(half_u, std::abs(dA.dot(u)));
-                    half_v = std::max(half_v, std::abs(dA.dot(v)));
-                    half_u = std::max(half_u, std::abs(dB.dot(u)));
-                    half_v = std::max(half_v, std::abs(dB.dot(v)));
-                }
-                // ensure a reasonable minimum size based on the edge length
-                double edge_len = (pB - pA).norm();
-                double min_half = 0.25 * edge_len;
-                half_u = std::max(half_u, min_half) * 1.2;
-                half_v = std::max(half_v, min_half) * 1.2;
-
-                Eigen::Vector3d c00 = centroid3 +  half_u * u +  half_v * v;
-                Eigen::Vector3d c10 = centroid3 -  half_u * u +  half_v * v;
-                Eigen::Vector3d c11 = centroid3 -  half_u * u -  half_v * v;
-                Eigen::Vector3d c01 = centroid3 +  half_u * u -  half_v * v;
-
-                Eigen::MatrixXd plane_V(4, 3);
-                plane_V.row(0) = c00.transpose();
-                plane_V.row(1) = c10.transpose();
-                plane_V.row(2) = c11.transpose();
-                plane_V.row(3) = c01.transpose();
-                Eigen::MatrixXi plane_F(2, 3);
-                plane_F << 0, 1, 2,
-                            0, 2, 3;
-                polyscope::registerSurfaceMesh("best_fit_plane", plane_V, plane_F);
-                polyscope::show();
-            }
-            #endif
         }
     }
 }

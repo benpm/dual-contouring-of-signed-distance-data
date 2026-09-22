@@ -1,151 +1,118 @@
-#include "contouring.h"
+#include <dcsdd/contouring.h>
+
+#include "geometry.h"
 
 #include <Eigen/Core>
 
 #include <cassert>
-#include <cmath>
 #include <stdexcept>
 #include <vector>
 
 namespace {
 
-struct GridFixture {
-    int resolution = 10;
-    Eigen::MatrixXd positions;
-    Eigen::VectorXd samples;
-};
-
-GridFixture make_sphere_grid() {
-    GridFixture fixture;
-    const int n = fixture.resolution;
-    fixture.positions.resize(n * n * n, 3);
-    fixture.samples.resize(n * n * n);
-    for (int k = 0; k < n; ++k) {
-        for (int j = 0; j < n; ++j) {
-            for (int i = 0; i < n; ++i) {
-                const int index = i + n * (j + n * k);
+dcsdd::SampleGrid make_sphere_grid(int resolution = 10) {
+    dcsdd::SampleGrid grid;
+    grid.dimensions = Eigen::Vector3i::Constant(resolution);
+    grid.positions.resize(resolution * resolution * resolution, 3);
+    grid.samples.resize(resolution * resolution * resolution);
+    for (int z = 0; z < resolution; ++z) {
+        for (int y = 0; y < resolution; ++y) {
+            for (int x = 0; x < resolution; ++x) {
+                const int index = x + resolution * (y + resolution * z);
                 const Eigen::Vector3d point(
-                    -1.0 + 2.0 * i / (n - 1.0),
-                    -1.0 + 2.0 * j / (n - 1.0),
-                    -1.0 + 2.0 * k / (n - 1.0)
+                    -1.0 + 2.0 * x / (resolution - 1.0),
+                    -1.0 + 2.0 * y / (resolution - 1.0),
+                    -1.0 + 2.0 * z / (resolution - 1.0)
                 );
-                fixture.positions.row(index) = point.transpose();
-                fixture.samples[index] = point.norm() - 0.6;
+                grid.positions.row(index) = point;
+                grid.samples[index] = point.norm() - 0.6;
             }
         }
     }
-    return fixture;
+    return grid;
 }
 
 void test_methods_generate_meshes() {
-    const GridFixture fixture = make_sphere_grid();
-    for (ContouringMethod method : {
-        ContouringMethod::MarchingCubes,
-        ContouringMethod::DualContouring,
-        ContouringMethod::Ours
+    const dcsdd::SampleGrid grid = make_sphere_grid();
+    for (dcsdd::Method method : {
+        dcsdd::Method::MarchingCubes,
+        dcsdd::Method::DualContouring,
+        dcsdd::Method::Optimized
     }) {
-        ContouringOptions options;
+        dcsdd::Options options;
         options.method = method;
-        options.outer_iters = 0;
-        options.inner_iters = 1;
-        Eigen::MatrixXd vertices;
-        Eigen::MatrixXi faces;
-        contouring(
-            fixture.samples,
-            fixture.positions,
-            fixture.resolution,
-            fixture.resolution,
-            fixture.resolution,
-            0.0,
-            vertices,
-            faces,
-            options
-        );
-        assert(vertices.rows() > 0);
-        assert(faces.rows() > 0);
-        assert(vertices.allFinite());
+        options.outer_iterations = 0;
+        options.inner_iterations = 1;
+        dcsdd::Mesh mesh;
+        assert(dcsdd::generate(grid, mesh, options) == dcsdd::Status::Completed);
+        assert(mesh.vertices.rows() > 0);
+        assert(mesh.faces.rows() > 0);
+        assert(mesh.vertices.allFinite());
     }
 }
 
-void test_cancellation_preserves_outputs() {
-    const GridFixture fixture = make_sphere_grid();
-    ContouringOptions options;
-    Eigen::MatrixXd vertices = Eigen::MatrixXd::Constant(1, 3, 42.0);
-    Eigen::MatrixXi faces = Eigen::MatrixXi::Constant(1, 3, 7);
-    ContouringCallbacks callbacks;
+void test_cancellation_preserves_output() {
+    const dcsdd::SampleGrid grid = make_sphere_grid();
+    dcsdd::Mesh mesh;
+    mesh.vertices = Eigen::MatrixXd::Constant(1, 3, 42.0);
+    mesh.faces = Eigen::MatrixXi::Constant(1, 3, 7);
+    dcsdd::Callbacks callbacks;
     callbacks.cancel_requested = []() { return true; };
-    const ContouringStatus status = contouring(
-        fixture.samples,
-        fixture.positions,
-        fixture.resolution,
-        fixture.resolution,
-        fixture.resolution,
-        0.0,
-        vertices,
-        faces,
-        options,
-        callbacks
-    );
-    assert(status == ContouringStatus::Cancelled);
-    assert(vertices.rows() == 1 && vertices(0, 0) == 42.0);
-    assert(faces.rows() == 1 && faces(0, 0) == 7);
+    assert(dcsdd::generate(grid, mesh, {}, callbacks) == dcsdd::Status::Cancelled);
+    assert(mesh.vertices.rows() == 1 && mesh.vertices(0, 0) == 42.0);
+    assert(mesh.faces.rows() == 1 && mesh.faces(0, 0) == 7);
 }
 
 void test_progress_completes() {
-    const GridFixture fixture = make_sphere_grid();
-    ContouringOptions options;
-    options.method = ContouringMethod::MarchingCubes;
-    std::vector<ContouringStage> stages;
-    ContouringCallbacks callbacks;
-    callbacks.progress = [&stages](const ContouringProgress& progress) {
+    const dcsdd::SampleGrid grid = make_sphere_grid();
+    dcsdd::Options options;
+    options.method = dcsdd::Method::MarchingCubes;
+    std::vector<dcsdd::Stage> stages;
+    dcsdd::Callbacks callbacks;
+    callbacks.progress = [&stages](const dcsdd::Progress& progress) {
         assert(progress.fraction >= 0.0 && progress.fraction <= 1.0);
         stages.push_back(progress.stage);
     };
-    Eigen::MatrixXd vertices;
-    Eigen::MatrixXi faces;
-    const ContouringStatus status = contouring(
-        fixture.samples,
-        fixture.positions,
-        fixture.resolution,
-        fixture.resolution,
-        fixture.resolution,
-        0.0,
-        vertices,
-        faces,
-        options,
-        callbacks
-    );
-    assert(status == ContouringStatus::Completed);
+    dcsdd::Mesh mesh;
+    assert(dcsdd::generate(grid, mesh, options, callbacks) == dcsdd::Status::Completed);
     assert(!stages.empty());
-    assert(stages.back() == ContouringStage::Complete);
+    assert(stages.back() == dcsdd::Stage::Complete);
 }
 
 void test_validation() {
-    const GridFixture fixture = make_sphere_grid();
-    ContouringOptions options;
+    dcsdd::SampleGrid grid = make_sphere_grid();
+    grid.dimensions.x() = 1;
+    dcsdd::Mesh mesh;
     bool threw = false;
     try {
-        validate_contouring_input(
-            fixture.samples,
-            fixture.positions,
-            1,
-            fixture.resolution,
-            fixture.resolution,
-            0.0,
-            options
-        );
+        dcsdd::generate(grid, mesh);
     } catch (const std::invalid_argument&) {
         threw = true;
     }
     assert(threw);
 }
 
+void test_triangle_bvh() {
+    Eigen::MatrixXd vertices(3, 3);
+    vertices << 0.0, 0.0, 0.0,
+                1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0;
+    Eigen::MatrixXi faces(1, 3);
+    faces << 0, 1, 2;
+    const TriangleBvh tree(vertices, faces);
+    const ClosestPointQuery query = tree.closest_point(Eigen::Vector3d(0.25, 0.25, 1.0));
+    assert(query.face_index == 0);
+    assert(std::abs(query.squared_distance - 1.0) < 1e-12);
+    assert((query.point - Eigen::Vector3d(0.25, 0.25, 0.0)).norm() < 1e-12);
+}
+
 } // namespace
 
 int main() {
     test_methods_generate_meshes();
-    test_cancellation_preserves_outputs();
+    test_cancellation_preserves_output();
     test_progress_completes();
     test_validation();
+    test_triangle_bvh();
     return 0;
 }

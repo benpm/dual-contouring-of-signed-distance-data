@@ -1,12 +1,11 @@
 #include "vertex_refinement.h" 
 #include "Cell.h" 
+#include "geometry.h"
 #include <Eigen/Dense>
 #include <iostream>
 #include <algorithm>
 #include <map>
 #include <cmath>
-#include <igl/point_mesh_squared_distance.h>
-#include <igl/AABB.h>   
 
 
 // Indices: [0:+X, 1:-X, 2:+Y, 3:-Y, 4:+Z, 5:-Z]
@@ -86,8 +85,8 @@ void closest_points_on_mesh(
     Eigen::VectorXi I;            // Index of the closest face per query
     Eigen::MatrixXd C;            // Closest point coordinates (rows = queries)
 
-    // igl supports multiple query points at once
-    igl::point_mesh_squared_distance(targets, V_mesh, F_mesh, sq_distances, I, C);
+    TriangleBvh tree(V_mesh, F_mesh);
+    tree.closest_points(targets, sq_distances, I, C);
 
     if (C.rows() == targets.rows()) {
         closest_points_out = C;
@@ -129,15 +128,11 @@ static std::vector<ClosestPointInfo> compute_sphere_to_mesh_closest_points(
     Eigen::VectorXi face_indices;
     closest_pts.resize(N, 3);
     face_indices.resize(N);
-    igl::AABB<Eigen::MatrixXd, 3> tree;
-    tree.init(V_mesh, F_mesh);
+    TriangleBvh tree(V_mesh, F_mesh);
     for (size_t i = 0; i < N; ++i) {
-        Eigen::RowVector3d c = centers.row(i);
-        int fid;
-        Eigen::RowVector3d cp;
-        tree.squared_distance(V_mesh, F_mesh, c, fid, cp);
-        closest_pts.row(i) = cp;
-        face_indices(i) = fid;
+        const ClosestPointQuery query = tree.closest_point(centers.row(i));
+        closest_pts.row(i) = query.point;
+        face_indices(i) = query.face_index;
     }
     
     // closest_points_on_mesh(V_mesh, F_mesh, centers, closest_pts, face_indices);
@@ -278,4 +273,3 @@ void refine_vertex_from_face_intersections(
 
     cell.closest_points_info = compute_sphere_to_mesh_closest_points(cell, V_mesh, F_mesh);
 }
-

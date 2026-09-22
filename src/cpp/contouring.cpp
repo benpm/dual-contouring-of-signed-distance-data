@@ -1,23 +1,18 @@
 #include "contouring.h"
 #include "Cell.h"
 #include "vertex_refinement.h"
-#include "ui.h"
+#include "geometry.h"
 #include <algorithm>
 #include <vector>
 #include <cassert>
 #include <cmath>
-#include <igl/marching_cubes.h>
 #include <iostream>
 #include <random>
 #include <stdexcept>
-#include <igl/point_mesh_squared_distance.h>
-#include <igl/AABB.h>
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 #include "hermite_update.h"
 
-
-int currentCell = 0;
-std::string activeStructureName = "active_cell_pc";
 
 inline int index3D(int i, int j, int k, int resX, int resY, int resZ) {
     return i + resX * (j + resY * k);
@@ -847,7 +842,7 @@ void assign_spheres_to_cells(
     // std::cout << "Assigning " << sphere_batch_inds.size() << " spheres to cells (batch size: " << bounded_batch_size << ")\n";
 
     // Compute the closest point on the mesh for each grid vertex
-    // Ensure faces are triangles (or edges/points) before calling libigl AABB routines
+    // The distance structure operates on triangles.
     Eigen::MatrixXd GV_batch;
     Eigen::VectorXd S_batch;
     GV_batch.resize((int)sphere_batch_inds.size(), 3);
@@ -860,7 +855,8 @@ void assign_spheres_to_cells(
     Eigen::VectorXd sqrD;
     Eigen::VectorXi I;
     Eigen::MatrixXd C;
-    igl::point_mesh_squared_distance(GV_batch, V, TriF, sqrD, I, C);
+    TriangleBvh tree(V, TriF);
+    tree.closest_points(GV_batch, sqrD, I, C);
 
     // For each grid vertex, create a sphere and assign it to the containing cell
     for (int gv = 0; gv < GV_batch.rows(); ++gv) {
@@ -953,7 +949,8 @@ double compute_total_distance_to_spheres(
     Eigen::VectorXd sqrD;
     Eigen::VectorXi I;
     Eigen::MatrixXd C;
-    igl::point_mesh_squared_distance(sphere_centers, V, TriF, sqrD, I, C);
+    TriangleBvh tree(V, TriF);
+    tree.closest_points(sphere_centers, sqrD, I, C);
 
     // Compute cell diagonal
     double min_x, min_y, min_z;
@@ -1293,8 +1290,9 @@ ContouringStatus contouring(
 
     if (options.method == ContouringMethod::MarchingCubes) {
         report_progress(callbacks, ContouringStage::ExtractingMesh, 0, 1, "Running Marching Cubes");
-        igl::marching_cubes(S, GV, resX, resY, resZ, isoValue, V, F);
-        if (is_cancelled(callbacks)) return ContouringStatus::Cancelled;
+        if (!marching_cubes(S, GV, resX, resY, resZ, isoValue, V, F, callbacks.cancel_requested)) {
+            return ContouringStatus::Cancelled;
+        }
         V_out = std::move(V);
         F_out = std::move(F);
         report_progress(callbacks, ContouringStage::Complete, 1, 1, "Complete");
