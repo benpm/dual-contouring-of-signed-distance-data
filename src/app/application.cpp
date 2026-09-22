@@ -1,4 +1,5 @@
 #include "application.h"
+#include "analytic_sdf.h"
 
 #include <imgui.h>
 
@@ -63,7 +64,7 @@ Application::Application(Renderer& renderer) : renderer_(renderer) {
             return d.cwiseMax(0.0).norm() + std::min(d.maxCoeff(), 0.0);
         }, {0.35f, 0.82f, 0.52f}, {-2.4f, -1.5f, 0.0f}},
         {5, "Octahedron", [](const Eigen::Vector3d& p) {
-            return (p.cwiseAbs().sum() - 0.95) / std::sqrt(3.0);
+            return dcsdd::analytic::octahedron(p, 0.95);
         }, {0.73f, 0.48f, 0.94f}, {0.0f, -1.5f, 0.0f}},
         {6, "Cut Sphere", [](const Eigen::Vector3d& p) {
             constexpr double radius = 0.75;

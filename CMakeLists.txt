@@ -34,6 +34,7 @@ target_include_directories(eigen_headers SYSTEM INTERFACE "${eigen_SOURCE_DIR}")
 add_library(dcsdd_core
     src/cpp/Cell.cpp
     src/cpp/Sphere.cpp
+    src/cpp/analytic_sdf.cpp
     src/cpp/api.cpp
     src/cpp/contouring.cpp
     src/cpp/geometry.cpp
@@ -46,6 +47,11 @@ target_include_directories(dcsdd_core
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp"
 )
 target_link_libraries(dcsdd_core PUBLIC Eigen3::Eigen)
+
+add_executable(dcsdd_screenshot src/tools/screenshot.cpp)
+target_include_directories(dcsdd_screenshot PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp")
+target_link_libraries(dcsdd_screenshot PRIVATE dcsdd::core)
+install(TARGETS dcsdd_screenshot RUNTIME DESTINATION bin)
 
 if(DCSDD_BUILD_APP)
     enable_language(C)
@@ -91,7 +97,10 @@ if(DCSDD_BUILD_APP)
         src/app/main.cpp
         src/app/renderer.cpp
     )
-    target_include_directories(dcsdd_gallery PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/app")
+    target_include_directories(dcsdd_gallery PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/app"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp"
+    )
     target_link_libraries(dcsdd_gallery PRIVATE dcsdd::core imgui glfw OpenGL::GL Threads::Threads)
     if(APPLE)
         target_compile_definitions(dcsdd_gallery PRIVATE GL_SILENCE_DEPRECATION)

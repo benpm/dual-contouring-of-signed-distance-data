@@ -53,6 +53,16 @@ The gallery generates a sphere, box, torus, cylinder, octahedron, and cut sphere
 
 The application has no model loading, export, or editing controls.
 
+## Screenshot CLI
+
+Generate and render the octahedron without opening a window:
+
+```bash
+./build/macos-release/dcsdd_screenshot --output diamond.png
+```
+
+Use `--help` to list resolution, image size, contouring method, and iteration options. The command prints the maximum vertex error against the analytic octahedron surface and the longest mesh edge.
+
 ## Library
 
 Include `dcsdd/contouring.h` and link `dcsdd::core`.
